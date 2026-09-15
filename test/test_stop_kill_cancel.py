@@ -665,6 +665,15 @@ class TestConservativeShutdown:
         mgr._report_owners = {}
         # The reap coalesces concurrent stops through this per-run map.
         mgr._reaps_in_flight = {}
+        # Fork adaptation: the terminal-report path reached by _force_reap now
+        # bumps the attachment fence synchronously at the done-flip and, in its
+        # _forget callback, drops the settled run's live state; both read maps
+        # that __init__ owns but __new__ never populated.
+        mgr._attachment_generations = {}
+        mgr._active_terminal_deliveries = {}
+        mgr._teardown_gates = {}
+        mgr._abandoned_state_writers = set()
+        mgr._conversations = {}
         # Fork adaptation: _force_reap pumps the spawn queue after freeing a
         # slot (a1933a4b, ported earlier in this branch); an empty queue makes
         # _drain_queue return immediately without touching other attrs.
@@ -733,6 +742,13 @@ class TestConservativeShutdown:
         mgr._report_owners = {}
         # The reap coalesces concurrent stops through this per-run map.
         mgr._reaps_in_flight = {}
+        # Fork adaptation: see test_session_sharing_never_kills_runtime — the
+        # terminal-report path bumps the attachment fence and drops live state.
+        mgr._attachment_generations = {}
+        mgr._active_terminal_deliveries = {}
+        mgr._teardown_gates = {}
+        mgr._abandoned_state_writers = set()
+        mgr._conversations = {}
         # Fork adaptation: see test_session_sharing_never_kills_runtime.
         mgr._queue = []
         mgr._running_count = 2
