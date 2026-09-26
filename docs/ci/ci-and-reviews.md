@@ -393,6 +393,14 @@ Every job here is blocking. Every job that costs real runner time also `needs:`
 | `integration` | "Integration (in-process gateway)". The middle layer: `test/integration/` boots the real `GatewayOrchestrator.run()` inside the pytest process on a scratch `KIROCREW_HOME` with the packaged fake ACP backend and talks HTTP to the port it bound, so one test can assert across a restart, across two concurrent requests on one event loop, or on a file the boot itself wrote. Opt-in by `KIROCREW_INTEGRATION=1`, so the unit shards collect and skip it; Linux only. Gated on ROUTE coverage -- `scripts/check_integration_route_coverage.py` reports the share of registered dashboard routes the suite requested (`--min` is a ratchet kept a little under what `main` measures) and the report is uploaded as the `integration-route-coverage` artifact. Details: `docs/system-specs/common/testing-conventions.md`, "The integration layer" |
 | `e2e-boot-matrix` | Boots a real fake-backed gateway and pins seven tests on Linux and Windows for PRs; push-to-main runs add `macos-15`. Every leg is fail-closed on missing prerequisites or a collapsed pass count |
 
+The English i18n runtime chunk (`t`) has a 1005 KB ceiling, increased from 955 KB
+under the size gate's existing roughly 5% headroom policy. Its measured size is
+980,114 bytes (957.1 KB), including 2,166 bytes of English goal-control copy.
+The runtime, build configuration and dependencies are unchanged; the chunk
+contains 12 modules and no additional language catalog. This is an explicit
+catalog-growth budget increase, not a smaller bundle or a measured pristine-base
+build. Other chunk ceilings and the cycle gate remain unchanged.
+
 `backend-lint` also runs `scripts/check_python_audit.py` (report-only findings,
 fail-closed execution), `scripts/check_acp_frame_host_data.py`,
 `scripts/check_agent_sdk_boundary.py`, and

@@ -78,6 +78,36 @@ const OCCUPANCY_SITES = [
 // so the guard can tell them from an occupancy decision that has drifted.
 const IDENTITY_SITES = [
   {
+    what: "successor handoff: identify the listener on the successor port",
+    code: 'const owner = await probeGatewayPortOwner(expectPort);',
+    times: 1,
+  },
+  {
+    what: "successor handoff: only our gateway or its service may confirm",
+    code: 'if (owner === "kirocrew" || owner === "service") return "confirm";',
+    times: 1,
+  },
+  {
+    what: "successor handoff: retain the foreign-owner refusal",
+    code: 'if (owner === "foreign") return "foreign";',
+    times: 1,
+  },
+  {
+    what: "successor handoff: an unavailable identity probe cannot confirm",
+    code: 'if (owner === "unknown") {',
+    times: 1,
+  },
+  {
+    what: "successor poll: a foreign-owner verdict fails the handoff",
+    code: 'if (verdict === "foreign") {',
+    times: 1,
+  },
+  {
+    what: "boot: refuse an unconfigured foreign holder before adoption",
+    code: 'if (decision.action === "reuse" && localOwner === "foreign" && !remoteHost) {',
+    times: 1,
+  },
+  {
     what: "the exported primary-port probe hands the verdict to the IPC gate",
     code: 'return probeGatewayPortOwner(PORT);',
     times: 1,

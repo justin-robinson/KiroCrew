@@ -131,7 +131,11 @@ export const CHUNK_BUDGETS = {
   // the regenerated `en-XA`, which all land in this chunk by construction: measured
   // 907.7 KB on this branch before the judge row above landed on main, so the two
   // features together sit near 909 KB; same 5% convention over that size.
-  t: 955 * KB, // measured ~909 KB on this branch (~5% headroom)
+  // Measured 980,114 B (957.1 KB), including 2,166 B of English goal copy.
+  // The runtime/config/dependencies are unchanged and the chunk has 12 modules;
+  // no new library or non-English catalog is added. Restore ~5% headroom over
+  // that measurement, following this entry's catalog-growth policy.
+  t: 1005 * KB, // increased from 955 KB; measured 957.1 KB (~5% headroom)
 
   // Pierre editor implementation (PR #4072 replaced Monaco, whose
   // 'editor.api2' chunk this entry set used to carry) -- the code-editor

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -242,6 +243,19 @@ def test_pidfd_fallback_through_ctypes_signals_a_group_member(
 ) -> None:
     # Standalone CPython builds that lack os.pidfd_open are exactly the hosts that
     # motivated the fix; without the ctypes path can_reap() is False there.
+    # Check capability independently before exercising the ctypes fallback.
+    # Builds without the stdlib wrapper still run the strict fallback assertions.
+    native_opener = getattr(os, "pidfd_open", None)
+    if native_opener is not None:
+        try:
+            probe_fd = native_opener(os.getpid(), 0)
+        except OSError as exc:
+            if exc.errno in (errno.ENOSYS, errno.EPERM):
+                pytest.skip(f"native pidfd_open unavailable: {exc}")
+            raise
+        else:
+            os.close(probe_fd)
+
     monkeypatch.delattr(os, "pidfd_open", raising=False)
     monkeypatch.delattr(signal, "pidfd_send_signal", raising=False)
     assert supervisor.can_reap()
