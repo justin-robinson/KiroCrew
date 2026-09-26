@@ -156,7 +156,14 @@ class SlackTransport(MessagingTransport):
 
     # -- Inbound adapter ----------------------------------------------------
     def authorize(self, msg: InboundMessage) -> bool:
-        """Owner-only, deny-by-default. Empty allow-list authorizes nobody."""
+        """Allow-list-only, deny-by-default. Empty allow-list authorizes nobody.
+
+        NOT owner-only: the Slack gateway loads ``slack.allowed_users`` into the
+        set handed here, so an allow-listed guest passes this check like any other
+        allowed sender. What keeps a guest off the transport path is
+        ``handle_message_transport``'s own refusal of a non-empty ``guest_user``,
+        plus ``_route_message`` excluding an admitted guest from ``_use_transport``.
+        """
         allowed = bool(msg.user_id) and msg.user_id in self._allowed_users
         if not allowed:
             # Audit ALL denials, including empty/missing user_id (deny-by-default
