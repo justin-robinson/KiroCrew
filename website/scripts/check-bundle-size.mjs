@@ -131,7 +131,10 @@ export const CHUNK_BUDGETS = {
   // the regenerated `en-XA`, which all land in this chunk by construction: measured
   // 907.7 KB on this branch before the judge row above landed on main, so the two
   // features together sit near 909 KB; same 5% convention over that size.
-  t: 955 * KB, // measured ~909 KB on this branch (~5% headroom)
+  // Stub launch approval (review panel, before/after, bulk review list) adds
+  // ~24 catalog keys x 12 languages plus the regenerated `en-XA`: measured
+  // 958.5 KB, which the English fallback carries by construction.
+  t: 1006 * KB, // measured ~958 KB (~5% headroom)
 
   // Pierre editor implementation (PR #4072 replaced Monaco, whose
   // 'editor.api2' chunk this entry set used to carry) -- the code-editor
