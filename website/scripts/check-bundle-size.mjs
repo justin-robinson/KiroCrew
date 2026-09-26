@@ -131,7 +131,11 @@ export const CHUNK_BUDGETS = {
   // the regenerated `en-XA`, which all land in this chunk by construction: measured
   // 907.7 KB on this branch before the judge row above landed on main, so the two
   // features together sit near 909 KB; same 5% convention over that size.
-  t: 955 * KB, // measured ~909 KB on this branch (~5% headroom)
+  // The crew-log panel copy (on-by-default states, the switched-off notice and
+  // footer) adds about 0.9 KB of English and 1.7 KB of `en-XA` to this chunk,
+  // which then builds at 978,679 B (955.7 KB). No dependency lands here; the
+  // ceiling moves to the next whole KB over that measurement.
+  t: 956 * KB,
 
   // Pierre editor implementation (PR #4072 replaced Monaco, whose
   // 'editor.api2' chunk this entry set used to carry) -- the code-editor
