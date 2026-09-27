@@ -555,3 +555,60 @@ describe('KiroCrewCfgTab — subagent settings', () => {
     expect(saveBtn()).toBeDisabled()
   })
 })
+
+describe('KiroCrewCfgTab workspace actions', () => {
+  const row = (name: string) => screen.getByTestId(`workspace-row-${name}`)
+  const form = (name: string) => screen.getByTestId(`workspace-form-${name}`)
+
+  beforeEach(() => {
+    const m = seed()
+    m.updateWorkspace = vi.fn().mockResolvedValue({ ok: true })
+    m.deleteWorkspace = vi.fn().mockResolvedValue({ ok: true })
+  })
+
+  it('offers Delete on every workspace but the default', async () => {
+    await renderTab()
+    expect(within(row('ws-main')).queryByRole('button', { name: 'Delete' })).toBeNull()
+    expect(within(row('ws-idle')).getByRole('button', { name: 'Delete' })).toBeInTheDocument()
+  })
+
+  it('saves a new directory through PUT and refetches the config', async () => {
+    await renderTab()
+    fireEvent.click(within(row('ws-idle')).getByRole('button', { name: 'Change directory' }))
+    fireEvent.change(within(form('ws-idle')).getByRole('textbox', { name: 'Directory' }), { target: { value: ' /data/idle ' } })
+    fireEvent.click(within(form('ws-idle')).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(api.updateWorkspace).toHaveBeenCalledWith('ws-idle', { dir: '/data/idle' }))
+    await waitFor(() => expect(api.kirocrewConfig).toHaveBeenCalledTimes(2))
+  })
+
+  it('enables Delete only once the exact name is typed', async () => {
+    await renderTab()
+    fireEvent.click(within(row('ws-idle')).getByRole('button', { name: 'Delete' }))
+    const input = within(form('ws-idle')).getByRole('textbox', { name: 'Type \u201Cws-idle\u201D to confirm' })
+    const confirm = within(form('ws-idle')).getByRole('button', { name: 'Delete' })
+    fireEvent.change(input, { target: { value: 'ws-id' } })
+    expect(confirm).toBeDisabled()
+    fireEvent.change(input, { target: { value: 'ws-idle' } })
+    fireEvent.click(confirm)
+    await waitFor(() => expect(api.deleteWorkspace).toHaveBeenCalledWith('ws-idle'))
+  })
+
+  it('keeps the row buttons in place while a form is open, and Escape closes it', async () => {
+    await renderTab()
+    fireEvent.click(within(row('ws-idle')).getByRole('button', { name: 'Delete' }))
+    expect(within(row('ws-idle')).getByRole('button', { name: 'Delete' })).toBeDisabled()
+    fireEvent.keyDown(within(form('ws-idle')).getByRole('textbox'), { key: 'Escape' })
+    expect(screen.queryByTestId('workspace-form-ws-idle')).toBeNull()
+    expect(within(row('ws-idle')).getByRole('button', { name: 'Delete' })).toBeEnabled()
+  })
+
+  it('keeps the typed name and shows the refusal when delete fails', async () => {
+    vi.mocked(api).deleteWorkspace = vi.fn().mockRejectedValue(new Error("Workspace 'ws-idle' is referenced by agents: bot"))
+    await renderTab()
+    fireEvent.click(within(row('ws-idle')).getByRole('button', { name: 'Delete' }))
+    fireEvent.change(within(form('ws-idle')).getByRole('textbox'), { target: { value: 'ws-idle' } })
+    fireEvent.click(within(form('ws-idle')).getByRole('button', { name: 'Delete' }))
+    expect(await within(form('ws-idle')).findByText(/referenced by agents: bot/)).toBeInTheDocument()
+    expect(within(form('ws-idle')).getByRole('textbox')).toHaveValue('ws-idle')
+  })
+})

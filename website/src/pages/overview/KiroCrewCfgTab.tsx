@@ -1,11 +1,13 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Check, Bot, FolderOpen, Brain, Settings, Lock, Flame } from 'lucide-react'
+import { Check, Bot, FolderOpen, Brain, Settings, Lock, Flame, Plus } from 'lucide-react'
 import { api } from '../../api/client'
-import { Card, CardTitle, Badge, EmptyState } from '../../components/ui'
+import { Card, CardTitle, Badge, Btn, EmptyState, Input } from '../../components/ui'
 import ErrorNotice from '../../components/ErrorNotice'
 import InfoTip from '../../components/InfoTip'
 import SimpleSelect from '../../components/SimpleSelect'
+// The crew editor's create dialog, shared the way the Crewmates dialog shares it.
+import { WorkspaceModal } from '../KiroCrewAgentsPage'
 import { useProvider } from '../../providers'
 
 import type { KiroCrewAgent } from '../../components/AgentSelector'
@@ -34,6 +36,80 @@ function Tag({ children, active }: { children: React.ReactNode; active?: boolean
 
 function UsedByTags({ names }: { names: string[] }) {
   return <div className="flex gap-1 flex-wrap">{names.length > 0 ? names.map(n => <Tag key={n} active>{n}</Tag>) : <span className="text-muted text-[13px]">—</span>}</div>
+}
+
+/** One workspace row: change its directory in place, or delete it after its
+ *  exact name is typed. The backend refuses to delete the default workspace,
+ *  so that row offers no Delete. */
+function WorkspaceRow({ name, dir, isDefault, usedBy, onChanged }: { name: string; dir: string; isDefault: boolean; usedBy: string[]; onChanged: () => void }) {
+  const [mode, setMode] = useState<'view' | 'edit' | 'delete'>('view')
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const open = (next: 'edit' | 'delete') => { setMode(next); setDraft(next === 'edit' ? dir : ''); setError('') }
+  const run = async (call: () => Promise<unknown>) => {
+    setBusy(true)
+    setError('')
+    try {
+      await call()
+      setMode('view')
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const editing = mode === 'edit'
+  const close = () => { if (!busy) { setMode('view'); setError('') } }
+  return (
+    <>
+      <tr data-testid={`workspace-row-${name}`}>
+        <td className="px-2.5 py-2 text-sm text-text font-medium">
+          {name} {isDefault && <Badge variant="ok">{i18nT('pages.overview.kiroCrewCfgTab.default')}</Badge>}
+        </td>
+        <td className="px-2.5 py-2 text-[13px] font-mono text-muted">{dir}</td>
+        <td className="px-2.5 py-2"><UsedByTags names={usedBy} /></td>
+        <td className="px-2.5 py-2 text-right whitespace-nowrap">
+          {/* The row's buttons stay in place while a form is open below them, so
+              the clicked control never vanishes; only the form's own buttons act. */}
+          <Btn disabled={mode !== 'view'} aria-expanded={mode === 'edit'} onClick={() => open('edit')}>{i18nT('pages.overview.kiroCrewCfgTab.change_directory')}</Btn>
+          {!isDefault && <Btn danger disabled={mode !== 'view'} aria-expanded={mode === 'delete'} className="ml-2" onClick={() => open('delete')}>{i18nT('settings.secrets.delete')}</Btn>}
+        </td>
+      </tr>
+      {(mode !== 'view' || error) && (
+        <tr data-testid={`workspace-form-${name}`}>
+          <td colSpan={4} className="px-2.5 pb-2">
+            {mode !== 'view' && <div className="flex flex-col gap-2">
+              {editing
+                ? <div className="text-[12px] text-muted">{i18nT('pages.overview.kiroCrewCfgTab.change_directory_hint')}</div>
+                : <>
+                  <div className="text-[12px] text-danger">{i18nT('pages.overview.kiroCrewCfgTab.delete_workspace_warning')}</div>
+                  <div className="text-[12px] text-text">{i18nT('pages.overview.kiroCrewCfgTab.type_workspace_name_to_confirm', { name })}</div>
+                </>}
+              <div className="flex gap-2">
+                <Input
+                  aria-label={editing ? i18nT('pages.overview.kiroCrewCfgTab.directory') : i18nT('pages.overview.kiroCrewCfgTab.type_workspace_name_to_confirm', { name })}
+                  placeholder={editing ? undefined : name}
+                  value={draft}
+                  onChange={e => setDraft(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Escape') close() }}
+                  autoFocus
+                />
+                <Btn disabled={busy} onClick={close}>{i18nT('settings.secrets.cancel')}</Btn>
+                {editing
+                  ? <Btn disabled={busy || !draft.trim() || draft.trim() === dir} onClick={() => run(() => api.updateWorkspace(name, { dir: draft.trim() }))}>{i18nT('settings.secrets.save')}</Btn>
+                  : <Btn danger disabled={busy || draft !== name} onClick={() => run(() => api.deleteWorkspace(name))}>{i18nT('settings.secrets.delete')}</Btn>}
+              </div>
+            </div>}
+            {/* No hand-off: the typed directory or confirm name (`draft`) is unsaved,
+                and the form stays open with it so a retry needs no retyping. */}
+            <ErrorNotice message={error} variant="inline" />
+          </td>
+        </tr>
+      )}
+    </>
+  )
 }
 
 const rowCls = "flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm"
@@ -134,6 +210,7 @@ export default function KiroCrewCfgTab() {
   const err = queryErr ? (queryErr instanceof Error ? queryErr.message : String(queryErr)) : ''
   const [saveErr, setSaveErr] = useState('')
   const [rev, setRev] = useState(0)
+  const [creatingWs, setCreatingWs] = useState(false)
 
   const reqId = useRef(0)
 
@@ -159,6 +236,12 @@ export default function KiroCrewCfgTab() {
   const agents = Object.entries(cfg.agents)
   const workspaces = Object.entries(cfg.workspaces)
   const stores = Object.entries(cfg.memory_stores)
+  // A workspace write changes the config this tab renders and the list the
+  // chat workspace picker reads.
+  const workspacesChanged = () => {
+    queryClient.invalidateQueries({ queryKey: ['kirocrewConfig'] })
+    queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+  }
 
   return (
     <>
@@ -195,30 +278,32 @@ export default function KiroCrewCfgTab() {
 
       {/* Workspaces */}
       <Card>
-        <CardTitle><FolderOpen className="lucide-inline" /> {i18nT('pages.overview.kiroCrewCfgTab.workspaces')} <InfoTip text={i18nT('pages.overview.kiroCrewCfgTab.named_workspace_directories_each_agent_binds_to')} /></CardTitle>
+        <div className="flex items-center justify-between gap-2 mb-3.5">
+          <CardTitle className="mb-0"><FolderOpen className="lucide-inline" /> {i18nT('pages.overview.kiroCrewCfgTab.workspaces')} <InfoTip text={i18nT('pages.overview.kiroCrewCfgTab.named_workspace_directories_each_agent_binds_to')} /></CardTitle>
+          <Btn onClick={() => setCreatingWs(true)}><Plus className="lucide-inline" />{i18nT('pages.overview.kiroCrewCfgTab.new_workspace')}</Btn>
+        </div>
         <table className="w-full border-collapse table-striped">
           <thead>
             <tr>
               <th className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium">{i18nT('pages.overview.kiroCrewCfgTab.name')}</th>
               <th className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium">{i18nT('pages.overview.kiroCrewCfgTab.directory')}</th>
               <th className="text-left text-muted text-[12px] uppercase tracking-[.04em] px-2.5 py-2 border-b border-border font-medium">{i18nT('pages.overview.kiroCrewCfgTab.used_by')}</th>
+              <th className="border-b border-border"><span className="sr-only">{i18nT('pages.overview.memoryTab.actions')}</span></th>
             </tr>
           </thead>
           <tbody>
             {workspaces.map(([name, ws]) => {
               const usedBy = agents.filter(([, a]) => a.workspace === name).map(([n]) => n)
-              return (
-                <tr key={name}>
-                  <td className="px-2.5 py-2 text-sm text-text font-medium">
-                    {name} {name === cfg.default_workspace && <Badge variant="ok">{i18nT('pages.overview.kiroCrewCfgTab.default')}</Badge>}
-                  </td>
-                  <td className="px-2.5 py-2 text-[13px] font-mono text-muted">{ws.dir}</td>
-                  <td className="px-2.5 py-2"><UsedByTags names={usedBy} /></td>
-                </tr>
-              )
+              return <WorkspaceRow key={name} name={name} dir={ws.dir} isDefault={name === cfg.default_workspace} usedBy={usedBy} onChanged={workspacesChanged} />
             })}
           </tbody>
         </table>
+        <WorkspaceModal
+          open={creatingWs}
+          workspaceOptions={workspaces.map(([n]) => n)}
+          onClose={() => setCreatingWs(false)}
+          onCreated={() => { setCreatingWs(false); workspacesChanged() }}
+        />
       </Card>
 
       {/* Memory Stores */}
