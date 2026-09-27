@@ -131,7 +131,13 @@ export const CHUNK_BUDGETS = {
   // the regenerated `en-XA`, which all land in this chunk by construction: measured
   // 907.7 KB on this branch before the judge row above landed on main, so the two
   // features together sit near 909 KB; same 5% convention over that size.
-  t: 955 * KB, // measured ~909 KB on this branch (~5% headroom)
+  // Re-measured 2026-09-27 with `vite build --mode analyze`: main @ 20ed6a1dc7 alone builds
+  // this chunk at 977,948 B, 28 B over the 955 KB (977,920 B) ceiling, so the gate fails on
+  // every open PR's merge ref. Attribution measured, not assumed: pristine main in its own
+  // worktree, then the Crew Companion reminder-edit branch on top of it at 977,925 B, 23 B
+  // SMALLER than main (it removes more catalog strings than it adds). The growth is main's
+  // catalogs, which no lazy import() can move. Same 5% convention over the measured 955 KB.
+  t: 1003 * KB, // measured ~955 KB on main @ 20ed6a1dc7 (~5% headroom)
 
   // Pierre editor implementation (PR #4072 replaced Monaco, whose
   // 'editor.api2' chunk this entry set used to carry) -- the code-editor
