@@ -313,6 +313,16 @@ retry, and a user correction is the highest-value signal per character in the fi
 
 ## Endpoint
 
+The Sessions three-dot menu also opens `/session-dashboards`: a read-only
+summary gallery alongside each session's model-authored Dynamic Dashboards and
+native questions/approvals. It shares `['session-summary', slot]` with the chat
+panel and its websocket invalidation. Only visible cards read summaries (12
+initially, with explicit Show more); opening, filtering, or refreshing this
+page never calls the generation POST. Disabled, missing, stale, and failed
+summary reads remain distinct. Filtering hides cards rather than unmounting
+their unsent answer drafts. This view does not change summary generation,
+privacy, or ownership policy.
+
 ```
 GET /api/chat/slots/{slot}/summary
 ```
