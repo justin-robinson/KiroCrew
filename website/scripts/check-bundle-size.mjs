@@ -131,7 +131,17 @@ export const CHUNK_BUDGETS = {
   // the regenerated `en-XA`, which all land in this chunk by construction: measured
   // 907.7 KB on this branch before the judge row above landed on main, so the two
   // features together sit near 909 KB; same 5% convention over that size.
-  t: 955 * KB, // measured ~909 KB on this branch (~5% headroom)
+  // Re-measured 2026-09-27 at 955.03 KB (977,948 B) -- 28 B over the 955 KB
+  // ceiling. Same drift the notes above describe: catalog strings from features
+  // merged since #12927 set this ceiling (the Crewmates page #12924 and the
+  // system-metrics card #14097 both landed 2026-09-27), plus their `en-XA`
+  // regeneration, consumed the headroom. No lazy `import()` can move a catalog
+  // string out of this chunk (English is the always-loaded fallback), so the
+  // growth is irreducible. The four notes above each left this ceiling under the
+  // convention's headroom and it re-tripped on the next feature's ordinary
+  // strings; follow the file's 5% convention over the measurement this time to
+  // stop that recurrence.
+  t: 1003 * KB, // measured 955.03 KB 2026-09-27 (~5% headroom, per the file convention)
 
   // Pierre editor implementation (PR #4072 replaced Monaco, whose
   // 'editor.api2' chunk this entry set used to carry) -- the code-editor
