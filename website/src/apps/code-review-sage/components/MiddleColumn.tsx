@@ -10,8 +10,10 @@
 // live count so an in-flight review is never hidden behind a tab you are not
 // looking at.
 import { useState } from 'react'
-import { GitPullRequest, ListChecks } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { GitPullRequest, Inbox, ListChecks } from 'lucide-react'
 
+import { sageApi } from '../api'
 import { repoSlug, useSage } from '../context'
 import PrPickList from './PrPickList'
 import RunList from './RunList'
@@ -34,14 +36,14 @@ function Tab({
       aria-selected={active}
       // Same ring as every other control; without it the browser draws its own
       // blue outline, which is what made a focused tab look mis-styled.
-      className={`flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-1.5 text-[12px] font-medium rounded-md transition-colors cursor-pointer focus:outline-hidden focus-visible:ring-1 focus-visible:ring-accent/40 ${
+      className={`flex-auto min-w-0 whitespace-nowrap inline-flex items-center justify-center gap-1.5 px-2 py-1.5 text-[12px] font-medium rounded-md transition-colors cursor-pointer focus:outline-hidden focus-visible:ring-1 focus-visible:ring-accent/40 ${
         active
           ? 'bg-bg-elevated text-text border border-border'
           : 'bg-transparent text-muted border border-transparent hover:text-text'
       }`}
     >
-      <Icon size={13} aria-hidden="true" />
-      {label}
+      <Icon size={13} aria-hidden="true" className="flex-shrink-0" />
+      <span className="min-w-0 truncate" title={label}>{label}</span>
       {badge ? (
         <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-accent-subtle text-accent">
           <span
@@ -52,6 +54,33 @@ function Tab({
         </span>
       ) : null}
     </button>
+  )
+}
+
+/** Open PRs anywhere that request your review, fed into the same pick list.
+ *  Fetched on open and on refresh only: nothing polls. */
+function ReviewQueue() {
+  const q = useQuery({
+    queryKey: ['code-review-sage', 'review-queue'],
+    queryFn: sageApi.reviewQueue,
+    staleTime: Infinity,
+    // Reopening the tab re-reads the queue; nothing else refetches it.
+    refetchOnMount: 'always',
+  })
+
+  // An unset-up gh is a first-run state, not a failure: it reads as the empty
+  // text rather than as an error notice.
+  const setup = !!q.data?.setup_required
+  return (
+    <PrPickList source={{
+      prs: q.data?.prs ?? [], loading: q.isLoading, error: setup ? null : q.error, refresh: () => void q.refetch(),
+      note: q.data?.truncated
+        ? i18nT('apps.codeReviewSage.components.reviewQueue.starts_review_truncated')
+        : i18nT('apps.codeReviewSage.components.reviewQueue.starts_review'),
+      emptyTitle: setup
+        ? i18nT('apps.codeReviewSage.components.reviewQueue.setup_required')
+        : i18nT('apps.codeReviewSage.components.reviewQueue.empty'),
+    }} />
   )
 }
 
@@ -107,11 +136,19 @@ export default function MiddleColumn() {
           badge={live}
           onClick={() => setListTab('reviews')}
         />
+        <Tab
+          label={i18nT('apps.codeReviewSage.components.reviewQueue.tab')}
+          icon={Inbox}
+          active={listTab === 'queue'}
+          onClick={() => setListTab('queue')}
+        />
       </div>
 
       <div className="flex-1 min-h-0">
         {listTab === 'pulls' ? (
           <PrPickList />
+        ) : listTab === 'queue' ? (
+          <ReviewQueue />
         ) : (
           <div className="flex flex-col min-h-0 h-full">
             {/* Only shown when it changes something: with nothing hidden, a scope

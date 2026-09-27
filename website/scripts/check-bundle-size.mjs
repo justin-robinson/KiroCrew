@@ -131,7 +131,12 @@ export const CHUNK_BUDGETS = {
   // the regenerated `en-XA`, which all land in this chunk by construction: measured
   // 907.7 KB on this branch before the judge row above landed on main, so the two
   // features together sit near 909 KB; same 5% convention over that size.
-  t: 955 * KB, // measured ~909 KB on this branch (~5% headroom)
+  // Re-measured locally with `vite build --mode analyze`: main's tip (20ed6a1dc7)
+  // builds this chunk at 977,948 B, 28 B over the 955 KB ceiling. The Sage review
+  // queue branch adds its catalog strings on top: 978,442 B (+494 B). Catalog copy
+  // only, no dependency, and English is the always-loaded fallback, so no import()
+  // boundary can move it. Same 5% convention over the measured size.
+  t: 1003 * KB, // measured 978,442 B on this branch (~5% headroom)
 
   // Pierre editor implementation (PR #4072 replaced Monaco, whose
   // 'editor.api2' chunk this entry set used to carry) -- the code-editor
