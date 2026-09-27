@@ -581,6 +581,24 @@ either auth flavor can grant (see `_verify_unix_peer`):
    Unresolvable (warm-pool runtime before claim, cron scripts, pooled MCP
    backends — no pidfile in the ancestry; or a mapping published unsigned) →
    proceed under today's semantics.
+5. Peer pid hosts **several** sessions (the mapping's tenant section records a
+   count above one; see the sidecar contract in `session.md`) → the resolved
+   key cannot be compared, because step 3 answers per PROCESS and the question
+   is which of that process's sessions is calling. Membership in the roster is
+   necessary but NOT sufficient: the `.txt` is agent-readable, so a co-tenant
+   could read a sibling's key out of it and declare that. Such a request
+   additionally requires an `X-Session-Token` that
+   `session_token_sig.verify_session_token` resolves to exactly the declared
+   key — the token's MAC is keyed by the agent-unreadable SEL trust root and
+   names ONE session, which peer credentials cannot distinguish on a shared
+   runtime. No token, or a token naming another session → **403**
+   `peer_session_unattested`. A truncated roster does not weaken this: a
+   recorded count above one is the evidence the token is required, so a
+   declared key absent from a SHORT membership is still challenged rather than
+   admitted as "membership unknown". Both outcomes are SEL-recorded, including
+   the admitted one, and each names the roster shape it judged so the trail
+   distinguishes a full membership from a short one. A 1:1 pid is unchanged and
+   requires no token.
 
 CSRF interplay: `check_origin`'s no-Origin branch trusts the unix transport
 (`origin.request_is_unix_socket`) exactly as it trusts loopback TCP — a
