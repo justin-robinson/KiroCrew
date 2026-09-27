@@ -1186,8 +1186,69 @@ class TerminalCoordinator(ManagerComponent):
         if handle is None:
             logger.warning("Reaper: no session found for %s", session_key)
             return None
+        # Imported HERE, not at the top of the module: every ``*_impl`` is
+        # rebound onto ``subagent``'s globals, so a module-level import in this
+        # file is inert for it.
+        from kiro_crew.runtime_ownership import authorize_runtime_kill, release_session_lease
+
+        # Ownership, asked once before the verified kill. The recycle check
+        # inside it answers a different question -- whether this pid is still
+        # the process we recorded -- and a yes to that is not a yes to this:
+        # with session sharing on, the process this sub-agent ran on also
+        # carries its parent and its siblings, and the graceful reset this
+        # ladder is the fallback for hung for ONE of them.
+        #
+        # The run's OWN lease goes first, and that ordering is what makes the gate
+        # answer the right question. A reset releases the lease inside
+        # ``provider.shutdown()``, so a reset that hung before it -- which is the
+        # only reason this ladder runs -- still holds one, and a gate asked then
+        # would let the session being destroyed refuse its own last-resort kill.
+        # The process would survive wedged and its pid would go on being refused by
+        # every sweep for the gateway's life. Releasing first leaves exactly the
+        # leases of OTHER tenants, which are the only ones that may withhold a
+        # signal. Best effort: a release that fails costs an honest refusal, while
+        # an exception here would cost the wedged process its last kill.
+        try:
+            for entry in self._manager._sessions.tearing_down(session_key):
+                entry_handle = getattr(entry, "handle", None)
+                if getattr(entry_handle, "pid", None) != handle.pid:
+                    continue
+                if getattr(entry_handle, "start_id", None) != handle.start_id:
+                    continue
+                provider = getattr(getattr(entry, "session", None), "provider", None)
+                if provider is not None:
+                    await release_session_lease(provider)
+        except Exception:
+            logger.debug(
+                "Reaper: could not release this teardown's own lease for %s; asking the gate "
+                "anyway",
+                session_key,
+                exc_info=True,
+            )
+
+        # A refusal withholds the tree signal AND the escaped-children sweep. The
+        # recorded child set is the SHARED root's whole descendant tree, not this
+        # run's alone -- with session sharing on it holds the co-tenant's MCP and
+        # node children -- so sweeping it after sparing the root would spare the
+        # process and kill the processes it depends on, which is worse than either
+        # ending it or leaving it alone. The refusal is RETURNED so the caller's
+        # record cannot say the run was reaped, and the surviving tree stays the
+        # reconciler's to count.
+        helpers = child_process_helpers()
+        if handle.pid and not authorize_runtime_kill(
+            handle.pid,
+            reason=f"graceful reset hung for {session_key}",
+            caller="subagent_manager.terminal._sigkill_session_impl",
+        ):
+            logger.warning(
+                "Reaper: another session holds a lease on PID %d; leaving its tree to the "
+                "reconciler for %s",
+                handle.pid,
+                session_key,
+            )
+            return "RuntimeOwnership: a session still holds a lease on the runtime"
         return await kill_verified_process(
-            handle, who="Reaper", key=session_key, child_helpers=child_process_helpers()
+            handle, who="Reaper", key=session_key, child_helpers=helpers
         )
 
     def notify_injection_failed_impl(

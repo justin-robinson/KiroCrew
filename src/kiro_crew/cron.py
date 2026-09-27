@@ -92,6 +92,7 @@ from kiro_crew.process_identity import (
     with_kill_failure,
 )
 from kiro_crew.resource_status import admission_check
+from kiro_crew.runtime_ownership import authorize_runtime_kill, release_session_lease
 from kiro_crew.validation import CHANNEL_MAX_LEN, MAX_CRON_MESSAGE, MAX_SHORT_STRING
 
 logger = logging.getLogger(__name__)
@@ -3207,6 +3208,41 @@ class CronService:
             # snapshot -- a successor, not this run's process.
             logger.warning("%s: no session found for %s", who, session_key)
             return None
+        # Ownership, asked once before the escalation below starts. A cron runtime
+        # is not a chat-pool tenant, so at cap=1 this usually allows -- but the
+        # sub-agents a cron turn dispatched run ON that runtime and take their own
+        # leases, and this path fires when the graceful reset hung, which is
+        # exactly when one of them is still working. The handle proves WHICH
+        # process; the lease says whether anyone is still on it.
+        #
+        # The run's OWN lease is released first, and that ordering is the whole
+        # correctness of the gate here. A reset releases the lease inside
+        # ``provider.shutdown()``, so every await before it -- the ended-record
+        # write, the queue unlink, the child probes -- is a point where the
+        # teardown can hang or raise and land on this path with the lease still
+        # held. Asking the gate then would let the session being destroyed refuse
+        # its own last-resort kill: the wedged process would survive, and its pid
+        # would go on being refused by every sweep for the gateway's life while
+        # the run recorded a false "leased by another tenant". The rule this
+        # follows is the one the allocation path's own failure handler states --
+        # release before the kill, or the cleanup refuses its own teardown.
+        #
+        # What survives the release is a lease held by a DIFFERENT tenant, which
+        # is the only thing that may withhold the signal. A refusal is then
+        # reported the same way a refused pid is: as the thing that stopped the
+        # kill, so the run is never recorded as reaped over a process tree that is
+        # still standing.
+        await self._release_teardown_lease(session_key, handle, who=who)
+        handle_pid = getattr(handle, "pid", None)
+        if isinstance(handle_pid, int) and not authorize_runtime_kill(
+            handle_pid,
+            reason=f"cron run teardown for {session_key}",
+            caller="cron._sigkill_session",
+        ):
+            logger.warning(
+                "%s: %s still leased by another tenant; not signalling it", who, session_key
+            )
+            return "runtime still leased by another tenant"
         # The client's child-tree probe, record capture and escaped-children sweep,
         # resolved through the session module at call time (circular import:
         # session → cron; and a test's patch of the client module is what the
@@ -3216,6 +3252,54 @@ class CronService:
         return await kill_verified_process(
             handle, who=who, key=session_key, child_helpers=child_process_helpers()
         )
+
+    async def _release_teardown_lease(self, session_key: str, handle: object, *, who: str) -> None:
+        """Release the lease held by the session THIS teardown is destroying.
+
+        A teardown's subject must not be able to refuse the teardown. The lease is
+        normally released inside ``provider.shutdown()``, which is the last step of
+        a reset, so a reset that hung or raised before it still holds one -- and
+        this kill path exists precisely for that case.
+
+        ``tearing_down`` is what makes the subject reachable after its pop: the
+        live map stops naming a session at the pop, before the teardown's awaits,
+        and this table holds the popped session for exactly the life of each
+        teardown. The entry is matched on the HANDLE this path was given, by pid
+        and start identity, so a key with several teardowns in flight releases the
+        one whose process is about to be signalled and leaves a sibling's lease
+        alone.
+
+        Best effort by design: every failure here is a reason to go on and ask the
+        gate, never a reason to abandon the kill. A release that did not happen
+        costs a refusal the caller reports honestly; an exception raised out of
+        here would cost the wedged process its only remaining kill.
+        """
+        try:
+            pid = getattr(handle, "pid", None)
+            start_id = getattr(handle, "start_id", None)
+            sessions = self._sessions
+            if sessions is None:
+                return
+            for entry in sessions.tearing_down(session_key):
+                entry_handle = getattr(entry, "handle", None)
+                if getattr(entry_handle, "pid", None) != pid:
+                    continue
+                if getattr(entry_handle, "start_id", None) != start_id:
+                    continue
+                provider = getattr(getattr(entry, "session", None), "provider", None)
+                if provider is None:
+                    continue
+                await release_session_lease(provider)
+                logger.debug(
+                    "%s: released the teardown's own lease on pid %s for %s", who, pid, session_key
+                )
+        except Exception:
+            logger.debug(
+                "%s: could not release the teardown's own lease for %s; asking the gate anyway",
+                who,
+                session_key,
+                exc_info=True,
+            )
 
     # ── User-initiated cancellation ──
 
