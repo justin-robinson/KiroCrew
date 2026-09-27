@@ -83,6 +83,43 @@ logger = logging.getLogger(__name__)
 
 LOCK_FILENAME = "gateway.lock"
 
+#: Process exit status for the one lock refusal a restart cannot heal: the
+#: lock is held by a running process, positively identified as its acquirer,
+#: that also holds the dashboard port this gateway was about to bind
+#: (``GatewayLockError.live_holder``) -- a sibling gateway serving this home.
+#: That condition stands for as long as the sibling runs, so a supervised
+#: relaunch meets the identical refusal every time while the sibling keeps
+#: serving; there is nothing for a second gateway to do here.
+#: ``service/linux.py`` feeds this value into the unit's
+#: ``RestartPreventExitStatus`` so a ``Restart=always`` unit goes ``failed``
+#: once, with the refusal line in the journal, instead of relaunching every
+#: ``RestartSec`` against a home that is already served. Every other refusal
+#: keeps exit 1 and IS relaunched, because a later attempt can find it cleared
+#: or because the evidence for standing down is not there: a lock file
+#: replaced faster than it can be locked, a home that cannot be opened or
+#: measured for directory locks, an flock whose acquirer is gone (a wedged
+#: inheritor holds it until that process dies), a live acquirer that does not
+#: hold the port (a sibling still starting, or one shutting down that has
+#: closed its listener and will release the lock next), and a holder no
+#: surface could identify -- no ``/proc/locks`` (macOS, Windows), or a Linux
+#: filesystem whose device numbers never match the lock table (btrfs
+#: subvolumes, overlayfs) -- where the recorded pid may be alive and on the
+#: port and still be a reused number rather than the process that holds the
+#: lock.
+#:
+#: 78 is ``EX_CONFIG`` from ``sysexits.h`` ("unconfigured or misconfigured
+#: state"): two supervisors pointed at one home is a host configuration, and
+#: the remedy is to change it -- stop the sibling or isolate ``KIROCREW_HOME``
+#: -- never to try again. Distinct from the two statuses the RUNNING gateway
+#: exits with on purpose to be relaunched, 69 (``EX_UNAVAILABLE``, listener
+#: lost) and 75 (``EX_TEMPFAIL``, stale assets), so a journal histogram tells
+#: the three apart.
+#:
+#: Lives here rather than in ``cli`` because ``cli`` returns the value while
+#: ``service/linux`` exempts it, and both import this module -- one
+#: definition, so the code that exits and the unit that exempts cannot drift.
+LIVE_HOLDER_EXIT_CODE = 78
+
 # How many times ``acquire`` re-opens the lock path and re-takes the home
 # anchor, and how many times :func:`_anchor_holder_or_nobody` re-probes an
 # anchor that read as held. It bounds two transient causes: the inode
@@ -125,12 +162,36 @@ _NO_DIRECTORY_LOCK_ERRNOS = frozenset(
 
 
 class GatewayLockError(RuntimeError):
-    """Raised when another process already owns this ``KIROCREW_HOME``."""
+    """Raised when another process already owns this ``KIROCREW_HOME``.
 
-    def __init__(self, home: Path, holder_pid: int | None, diagnosis: str | None = None) -> None:
+    ``live_holder`` is True only when the refusal rests on a POSITIVELY
+    identified acquirer -- the process ``/proc/locks`` names as holding the
+    flock (on the lock file, or on the home directory when the file has been
+    deleted or replaced) -- that is running and holds the dashboard port this
+    gateway was about to bind: a gateway serving this home, which this one can
+    displace on neither front while it lives. It is the structured form of that
+    verdict, so a caller deciding how to exit reads it rather than the message
+    text. Every other refusal leaves it False: a transient identity race, an
+    indeterminate home anchor, an flock whose acquirer is gone, a live acquirer
+    that does not hold the port (a sibling still starting or already shutting
+    down -- a later attempt resolves either), and every refusal in which no
+    surface names the acquirer (no ``/proc/locks``, or a filesystem it never
+    matches), where the recorded pid may be alive and on the port yet proves
+    nothing about who holds the lock.
+    """
+
+    def __init__(
+        self,
+        home: Path,
+        holder_pid: int | None,
+        diagnosis: str | None = None,
+        *,
+        live_holder: bool = False,
+    ) -> None:
         self.home = home
         self.holder_pid = holder_pid
         self.diagnosis = diagnosis
+        self.live_holder = live_holder
         if diagnosis:
             super().__init__(diagnosis)
             return
@@ -220,8 +281,8 @@ class GatewayLock:
                     # orphaned-flock wedge remains held through every bounded
                     # attempt and receives the existing diagnosis below.
                     continue
-                holder, diagnosis = self._diagnose(recorded)
-                raise GatewayLockError(self._home, holder, diagnosis)
+                holder, diagnosis, live = self._diagnose(recorded)
+                raise GatewayLockError(self._home, holder, diagnosis, live_holder=live)
             if not _is_same_file(fd, self._path):
                 # The path was unlinked or replaced between the open and the
                 # lock, so the inode we hold is not the one the next gateway
@@ -338,8 +399,8 @@ class GatewayLock:
                 None,
                 _indeterminate_anchor_message(self._home, probe_error),
             ) from probe_error
-        holder, diagnosis = self._diagnose_replaced_lock_file()
-        raise GatewayLockError(self._home, holder, diagnosis)
+        holder, diagnosis, live = self._diagnose_replaced_lock_file()
+        raise GatewayLockError(self._home, holder, diagnosis, live_holder=live)
 
     def __enter__(self) -> "GatewayLock":
         return self.acquire()
@@ -349,7 +410,7 @@ class GatewayLock:
 
     # -- diagnostics ------------------------------------------------------
 
-    def _diagnose(self, recorded_pid: int | None) -> tuple[int | None, str | None]:
+    def _diagnose(self, recorded_pid: int | None) -> tuple[int | None, str | None, bool]:
         """Resolve who holds the lock, distinguishing owner from mere opener.
 
         ``/proc/locks`` names the pid that ACQUIRED the flock, authoritatively.
@@ -358,8 +419,16 @@ class GatewayLock:
         dead acquirer. In that case no ``/proc`` surface names the inheritor, so
         we list the current openers as CANDIDATES and never as the owner.
 
-        Returns ``(pid, message)``. ``message`` is ``None`` when we learned
-        nothing, which leaves :class:`GatewayLockError` on its generic wording.
+        Returns ``(pid, message, live_holder)``. ``message`` is ``None`` when we
+        learned nothing, which leaves :class:`GatewayLockError` on its generic
+        wording. ``live_holder`` is True only when the process ``/proc/locks``
+        names as the ACQUIRER is running and holds the dashboard port -- a
+        gateway serving this home, positively identified. It is False on every
+        other row: a dead acquirer (its inheritor may yet exit and free the
+        home), a live acquirer without the port, and every shape in which no
+        surface names the acquirer at all -- there the recorded pid is a number
+        that may be reused, so even alive-and-on-the-port is a strong hint and
+        never the verdict (see :meth:`_describe_unidentified_owner`).
         """
         owner = platform_compat.flock_owner_pid(self._path)
         openers = platform_compat.pids_holding_file(self._path)
@@ -367,29 +436,49 @@ class GatewayLock:
             openers = [pid for pid in openers if pid != os.getpid()]
 
         if owner is not None and platform_compat.pid_exists(owner):
-            return owner, self._describe_live_owner(owner, recorded_pid)
+            message, live = self._describe_live_owner(owner, recorded_pid)
+            return owner, message, live
         if owner is not None:
-            return owner, self._describe_orphaned_lock(owner, openers)
-        # No /proc/locks (non-Linux, or unreadable): the recorded pid is all we
-        # have, so weigh its own facts rather than presenting it as the holder.
+            return owner, self._describe_orphaned_lock(owner, openers), False
+        # No /proc/locks (non-Linux, or unreadable) or no entry that matches
+        # this file: the recorded pid is all we have, so weigh its own facts
+        # rather than presenting it as the holder -- and never as a LIVE holder,
+        # since nothing here shows that pid acquired the lock.
         if recorded_pid is None:
-            return None, None
-        return recorded_pid, self._describe_unidentified_owner(recorded_pid)
+            return None, None, False
+        return recorded_pid, self._describe_unidentified_owner(recorded_pid), False
 
     def _describe_unidentified_owner(self, recorded_pid: int) -> str:
         """No surface names the flock owner, so report what the recorded pid proves.
 
-        macOS and Windows cannot identify an flock owner at all: ``F_GETLK``
-        reports ``l_pid = -1`` for a conflicting flock and ``lsof`` leaves the
-        lock field blank. Naming the owner is not what the operator needs,
-        though. Liveness and port ownership work on every platform, and between
-        them they separate the three states that lead to different actions:
-        the recorded pid is gone (an inherited descriptor holds the lock, and
-        nothing here can name the inheritor); it is running and holds the
-        dashboard port (a gateway, to be stopped); or it is running without the
+        Reached without ``/proc/locks`` -- macOS and Windows cannot identify an
+        flock owner at all (``F_GETLK`` reports ``l_pid = -1`` for a conflicting
+        flock and ``lsof`` leaves the lock field blank), and an unreadable
+        ``/proc`` is the same -- and on a Linux home whose filesystem reports a
+        device the lock table never matches (btrfs subvolumes, overlayfs; see
+        :func:`platform_compat.flock_owner_pid`). Naming the owner is not what
+        the operator needs, though. Liveness and port ownership work on every
+        platform, and between them they separate the three states that lead to
+        different actions: the recorded pid is gone (an inherited descriptor
+        holds the lock, and nothing here can name the inheritor); it is running
+        and holds the dashboard port (what a gateway serving this home looks
+        like, so ``kirocrew stop`` comes first); or it is running without the
         port, where the number may belong to an unrelated process that reused
-        it. Only the last one, and the case where no port was supplied to
-        measure, keep a hedge.
+        it. Every state keeps a hedge on WHO holds the lock, because that is the
+        one thing none of them establishes.
+
+        Never a live holder, whatever the port says -- which is why this
+        returns only the message and :meth:`_diagnose` hands
+        :class:`GatewayLockError` a fixed ``False`` for this branch. The
+        recorded pid is a number stamped by whoever locked the file LAST, and
+        pid numbers are reused; that the process now wearing it listens on the
+        port is consistent with a serving gateway, but nothing shows that
+        process ACQUIRED the lock. Treating it as one would exit
+        :data:`LIVE_HOLDER_EXIT_CODE` and stand a supervised unit down for good
+        on no evidence that anyone holds the lock. The verdict therefore needs
+        the acquirer positively identified, and only the ``/proc/locks``
+        surface (:meth:`_describe_live_owner`,
+        :meth:`_diagnose_replaced_lock_file`) can do that.
         """
         if not platform_compat.pid_exists(recorded_pid):
             return (
@@ -405,11 +494,14 @@ class GatewayLock:
                 f"The file records pid {recorded_pid}, which may be stale. "
                 "Stop the running gateway, or set KIROCREW_HOME to an isolated directory."
             )
-        if recorded_pid in platform_compat.find_listening_pids(self._port):
+        if self._holds_port(recorded_pid):
             return (
-                f"{self._path} is held by pid {recorded_pid}, which is running and holds port "
-                f"{self._port} -- another gateway already owns {self._home}; stop it first "
-                "(kirocrew stop) or set KIROCREW_HOME to an isolated directory"
+                f"{self._path} is locked and the pid it records ({recorded_pid}) is running and "
+                f"holds port {self._port} -- most likely another gateway already owns "
+                f"{self._home}; stop it first (kirocrew stop) or set KIROCREW_HOME to an "
+                "isolated directory. This platform or filesystem cannot confirm which process "
+                "holds the lock, so the refusal is not treated as permanent and a supervisor "
+                "(systemd) will retry it."
             )
         return (
             f"{self._path} is locked and the pid it records ({recorded_pid}) is running, but "
@@ -418,7 +510,7 @@ class GatewayLock:
             "KIROCREW_HOME to an isolated directory."
         )
 
-    def _diagnose_replaced_lock_file(self) -> tuple[int | None, str]:
+    def _diagnose_replaced_lock_file(self) -> tuple[int | None, str, bool]:
         """The home is still held, but its lock file does not name the holder.
 
         Reached when the lock file could be locked -- because it was deleted and
@@ -427,28 +519,48 @@ class GatewayLock:
         this process just created the file, or whatever is in it predates the
         deletion. The directory's own owner is the only thing worth reading, and
         only Linux can name it.
+
+        Returns ``(pid, message, live_holder)``; the holder is live only when
+        the directory's acquirer is named, running, and holds the dashboard
+        port -- the same two facts the lock file's own owner must show.
         """
         owner = platform_compat.flock_owner_pid(self._home)
+        live = False
         if owner is not None and platform_compat.pid_exists(owner):
-            facts = self._port_facts(owner)
+            live = self._holds_port(owner)
+            facts = self._port_facts(owner, live)
             who = f"pid {owner}" + (f" ({', '.join(facts)})" if facts else "")
         else:
             owner = None
             who = "a running gateway"
-        return owner, (
-            f"{self._home} is still held by {who}, but {self._path} no longer names it -- the "
-            "lock file was deleted or replaced while that gateway was running. Deleting the "
-            "lock file neither stops a gateway nor releases its lock; stop it first (kirocrew "
-            "stop) or set KIROCREW_HOME to an isolated directory."
+        return (
+            owner,
+            (
+                f"{self._home} is still held by {who}, but {self._path} no longer names it -- "
+                "the lock file was deleted or replaced while that gateway was running. Deleting "
+                "the lock file neither stops a gateway nor releases its lock; stop it first "
+                "(kirocrew stop) or set KIROCREW_HOME to an isolated directory."
+            ),
+            live,
         )
 
-    def _describe_live_owner(self, pid: int, recorded_pid: int | None) -> str:
-        """The ordinary case: a live process holds the lock, so name it."""
+    def _describe_live_owner(self, pid: int, recorded_pid: int | None) -> tuple[str, bool]:
+        """The ordinary case: a live process holds the lock, so name it.
+
+        Returns ``(message, live_holder)``. The verdict is True only when that
+        process also holds the dashboard port this gateway was about to bind:
+        a process holding both the home and its port is a gateway serving this
+        home, and this one can take neither while it lives. A live acquirer
+        WITHOUT the port is a gateway still starting (the next attempt sees the
+        port held) or shutting down (the next attempt takes the lock), and the
+        retry is what resolves both, so that shape stays restartable.
+        """
         facts: list[str] = []
         threads = platform_compat.process_thread_count(pid)
         if threads is not None:
             facts.append(f"{threads} thread{'s' if threads != 1 else ''}")
-        facts.extend(self._port_facts(pid))
+        holds_port = self._holds_port(pid)
+        facts.extend(self._port_facts(pid, holds_port))
         detail = f" ({', '.join(facts)})" if facts else ""
         message = (
             f"{self._path} is held by pid {pid}{detail} -- another gateway already owns "
@@ -457,7 +569,7 @@ class GatewayLock:
         )
         if recorded_pid is not None and recorded_pid != pid:
             message += f" (the lock file records pid {recorded_pid} -- stale)"
-        return message
+        return message, holds_port
 
     def _describe_orphaned_lock(self, dead_owner: int, openers: list[int] | None) -> str:
         """The wedge: the acquirer is gone but its flock lives on in an inheritor.
@@ -528,11 +640,21 @@ class GatewayLock:
             )
         return " ".join(lines)
 
-    def _port_facts(self, pid: int) -> list[str]:
-        """Port ownership facts for *pid*, empty when no port was supplied."""
+    def _holds_port(self, pid: int) -> bool:
+        """Whether *pid* listens on the dashboard port; False when none was supplied."""
+        return self._port is not None and pid in platform_compat.find_listening_pids(self._port)
+
+    def _port_facts(self, pid: int, holds_port: bool | None = None) -> list[str]:
+        """Port ownership facts for *pid*, empty when no port was supplied.
+
+        *holds_port* lets a caller that already asked :meth:`_holds_port` pass
+        the answer in rather than scanning the listeners a second time.
+        """
         if self._port is None:
             return []
-        if pid not in platform_compat.find_listening_pids(self._port):
+        if holds_port is None:
+            holds_port = self._holds_port(pid)
+        if not holds_port:
             return [f"does not hold port {self._port}"]
         answering = "answering" if _port_answers_http(self._port) else "not answering"
         return [f"holds port {self._port}, {answering} HTTP"]

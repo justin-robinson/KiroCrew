@@ -8,6 +8,7 @@ both start.
 import errno
 import json
 import os
+import socket
 import stat
 import sys
 from itertools import islice
@@ -245,6 +246,42 @@ def test_second_acquire_refused_and_names_holder(tmp_path):
         first.release()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="relies on /proc/locks")
+def test_a_refusal_by_a_live_acquirer_on_the_port_is_a_live_holder(kernel_lock_home, monkeypatch):
+    """The verdict a supervisor acts on, read off a REAL held lock and listener.
+
+    ``/proc/locks`` names this process as the acquirer, it is alive, and it
+    listens on the port the refused gateway would bind, so the refusal is the
+    terminal kind: a relaunch would meet it again for as long as the holder
+    runs. Without the port fact the same held lock is only a hedge (a sibling
+    starting or stopping), so that refusal stays restartable.
+    """
+    from kiro_crew import gateway_lock
+
+    # The listener never answers HTTP; skip the 1.5 s probe that only words the message.
+    monkeypatch.setattr(gateway_lock, "_port_answers_http", lambda *_a, **_k: False)
+    held = GatewayLock(kernel_lock_home).acquire()
+    listener = socket.socket()
+    try:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        with pytest.raises(GatewayLockError) as excinfo:
+            GatewayLock(kernel_lock_home, port=port).acquire()
+        assert excinfo.value.holder_pid == os.getpid()
+        assert f"holds port {port}" in str(excinfo.value)
+        assert excinfo.value.live_holder is True, _lock_failure_evidence(
+            kernel_lock_home / LOCK_FILENAME, (os.getpid(),)
+        )
+        with pytest.raises(GatewayLockError) as portless:
+            GatewayLock(kernel_lock_home).acquire()
+        assert portless.value.holder_pid == os.getpid()
+        assert portless.value.live_holder is False
+    finally:
+        listener.close()
+        held.release()
+
+
 def test_stale_lock_is_reclaimed(tmp_path):
     # A leftover lock file with a dead holder's pid but no held flock (the prior
     # process died -> the kernel released its lock). Acquire must succeed and
@@ -451,6 +488,39 @@ class TestLockFileIdentity:
         finally:
             held.release()
 
+    @pytest.mark.skipif(sys.platform != "linux", reason="relies on /proc/locks")
+    def test_a_home_still_held_by_a_live_gateway_is_a_live_holder(
+        self, kernel_lock_home, monkeypatch
+    ):
+        """Deleting the lock file changes the wording, not the verdict.
+
+        The home anchor's acquirer is this process, alive and on the port, so
+        the refusal is as terminal as the ordinary one: the same sibling keeps
+        serving whether or not the lock file still names it.
+        """
+        from kiro_crew import gateway_lock
+
+        if _directory_locks_supported(kernel_lock_home)[0] is not _DirectoryLockSupport.SUPPORTED:
+            pytest.skip("this filesystem does not implement directory locks")
+        monkeypatch.setattr(gateway_lock, "_port_answers_http", lambda *_a, **_k: False)
+        held = GatewayLock(kernel_lock_home).acquire()
+        listener = socket.socket()
+        try:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            port = listener.getsockname()[1]
+            os.unlink(kernel_lock_home / LOCK_FILENAME)
+            with pytest.raises(GatewayLockError) as excinfo:
+                GatewayLock(kernel_lock_home, port=port).acquire()
+            assert "no longer names it" in str(excinfo.value)
+            assert excinfo.value.holder_pid == os.getpid()
+            assert excinfo.value.live_holder is True, _lock_failure_evidence(
+                kernel_lock_home, (os.getpid(),)
+            )
+        finally:
+            listener.close()
+            held.release()
+
     @pytest.mark.skipif(platform_compat.IS_WINDOWS, reason="no home anchor on Windows")
     def test_release_frees_the_home_anchor_so_the_home_can_be_reacquired(self, tmp_path):
         # flock is per open file description, so a leaked anchor descriptor would
@@ -507,8 +577,11 @@ class TestLockFileIdentity:
             return fd
 
         monkeypatch.setattr(GatewayLock, "_open_lock_file", always_replace)
-        with pytest.raises(GatewayLockError, match="being replaced faster"):
+        with pytest.raises(GatewayLockError, match="being replaced faster") as excinfo:
             GatewayLock(tmp_path).acquire()
+        # A race, not an incumbent: the next attempt may well succeed, so this
+        # refusal must stay one a supervisor retries.
+        assert excinfo.value.live_holder is False
 
     @pytest.mark.skipif(platform_compat.IS_WINDOWS, reason="no home anchor on Windows")
     def test_a_filesystem_without_directory_locks_still_starts(self, tmp_path, monkeypatch):

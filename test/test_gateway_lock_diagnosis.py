@@ -605,6 +605,31 @@ def test_refusal_names_the_live_acquirer_from_proc_locks(monkeypatch, refused_lo
     assert "118 threads" in text and "port 5477, answering HTTP" in text
     assert "records pid 4242 -- stale" in text
     assert "kill" not in text.lower()  # never offer up a live gateway
+    # Running AND holding the port this gateway would bind: the one verdict a
+    # supervised relaunch cannot out-wait, so the refusal is terminal.
+    assert err.live_holder is True
+
+
+def test_a_live_acquirer_without_the_port_is_not_a_live_holder(monkeypatch, refused_lock):
+    """Alive but not on the port: a sibling still starting, or one shutting down
+    that has closed its listener and will release the lock next. Either way the
+    next attempt resolves it, so this refusal must stay the restartable kind."""
+    from kiro_crew import gateway_lock, platform_compat
+
+    monkeypatch.setattr(platform_compat, "flock_owner_pid", lambda _p: 16968)
+    monkeypatch.setattr(platform_compat, "pid_exists", lambda _p: True)
+    monkeypatch.setattr(platform_compat, "pids_holding_file", lambda _p: [16968])
+    monkeypatch.setattr(platform_compat, "process_thread_count", lambda _p: 1)
+    monkeypatch.setattr(platform_compat, "find_listening_pids", lambda _p: [])
+    monkeypatch.setattr(gateway_lock, "_port_answers_http", lambda *_a, **_k: False)
+
+    err = _refusal(refused_lock, port=5477)
+    assert err.holder_pid == 16968
+    assert "does not hold port 5477" in str(err)
+    assert err.live_holder is False
+    # With no port to weigh at all (`--port auto`, `--slack-only`), the verdict
+    # cannot be reached and the refusal likewise stays restartable.
+    assert _refusal(refused_lock).live_holder is False
 
 
 def test_refusal_names_the_dead_acquirer_and_the_single_inheritor(monkeypatch, refused_lock):
@@ -625,6 +650,9 @@ def test_refusal_names_the_dead_acquirer_and_the_single_inheritor(monkeypatch, r
     assert "pid 23184) no longer exists" in text
     assert "inherited that descriptor" in text
     assert "parent (pid 1) is gone" in text and "kill -9 23185" in text
+    # Not a live holder: the inheritor may exit on its own, and a relaunch is
+    # what brings the gateway back when it does, so the exit stays restartable.
+    assert err.live_holder is False
 
 
 def test_refusal_withholds_kill_when_the_candidates_parent_is_alive(monkeypatch, refused_lock):
@@ -711,10 +739,23 @@ def test_refusal_keeps_the_hedge_when_there_is_no_port_to_weigh(monkeypatch, ref
     assert "could not be identified" in text
     assert "may be stale" in text
     assert "kill" not in text.lower()  # we cannot name anyone -- do not guess
+    assert err.live_holder is False  # a hedge is not a verdict
 
 
-def test_refusal_names_a_live_port_holding_pid_without_an_owner_surface(monkeypatch, refused_lock):
-    """Running and holding the dashboard port: that is the gateway, so say so."""
+def test_refusal_hedges_when_a_live_port_holding_pid_has_no_owner_surface(
+    monkeypatch, refused_lock
+):
+    """Running and holding the dashboard port, but nothing shows it ACQUIRED the lock.
+
+    This is the shape without ``/proc/locks`` (macOS, Windows, an unreadable
+    ``/proc``) and on a Linux home whose filesystem reports a device the lock
+    table never matches (btrfs subvolumes, overlayfs). The recorded pid is the
+    only thing on file, and a pid number is reused: a process that happens to
+    listen on the port is what a serving gateway looks like, not proof of one.
+    So the message tells the operator what to do first, says plainly that the
+    holder cannot be confirmed, and the verdict stays restartable -- exit 78
+    would stand the unit down with no evidence anyone holds the lock.
+    """
     from kiro_crew import platform_compat
 
     monkeypatch.setattr(platform_compat, "flock_owner_pid", lambda _p: None)
@@ -725,11 +766,15 @@ def test_refusal_names_a_live_port_holding_pid_without_an_owner_surface(monkeypa
     err = _refusal(refused_lock, port=5477)
     text = str(err)
     assert err.holder_pid == 4242
-    assert "held by pid 4242" in text
     assert "running and holds port 5477" in text
-    assert "may be stale" not in text  # sending the operator after a phantom
+    assert "held by pid" not in text  # identity unknowable: never assert it
+    assert "cannot confirm" in text and "retr" in text  # the hedge, and why it matters
+    assert "may be stale" not in text  # the pid is alive; what is unknown is the lock
     assert "kirocrew stop" in text
     assert "kill" not in text.lower()
+    # Only a POSITIVELY identified acquirer (``/proc/locks``) that is running and
+    # on the port is a live holder; the recorded pid alone never is.
+    assert err.live_holder is False
 
 
 def test_refusal_hedges_when_the_recorded_pid_holds_no_port(monkeypatch, refused_lock):
@@ -741,10 +786,12 @@ def test_refusal_hedges_when_the_recorded_pid_holds_no_port(monkeypatch, refused
     monkeypatch.setattr(platform_compat, "pid_exists", lambda pid: pid == 4242)
     monkeypatch.setattr(platform_compat, "find_listening_pids", lambda _p: [])
 
-    text = str(_refusal(refused_lock, port=5477))
+    err = _refusal(refused_lock, port=5477)
+    text = str(err)
     assert "does not hold port 5477" in text
     assert "reused the number" in text
     assert "kill" not in text.lower()
+    assert err.live_holder is False
 
 
 def test_refusal_reports_an_inherited_lock_when_the_recorded_pid_is_gone(monkeypatch, refused_lock):
@@ -755,9 +802,11 @@ def test_refusal_reports_an_inherited_lock_when_the_recorded_pid_is_gone(monkeyp
     monkeypatch.setattr(platform_compat, "pids_holding_file", lambda _p: None)
     monkeypatch.setattr(platform_compat, "pid_exists", lambda _p: False)
 
-    text = str(_refusal(refused_lock, port=5477))
+    err = _refusal(refused_lock, port=5477)
+    text = str(err)
     assert "no longer exists" in text
     assert "inherited that descriptor" in text
     assert "may be stale" not in text
     assert "lsof " in text
     assert "kill" not in text.lower()
+    assert err.live_holder is False
